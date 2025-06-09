@@ -1,0 +1,644 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import mysql.connector
+from datetime import datetime
+
+# Константы для SQL запросов
+SQL_INSERT_USER = "INSERT INTO users (username, password, full_name) VALUES (%s, %s, %s)"
+SQL_SELECT_USER = "SELECT * FROM users WHERE username = %s AND password = %s"
+SQL_SELECT_PROPERTIES = "SELECT id, address, category, status, checkout_date FROM properties"
+SQL_SELECT_RENTALS = """
+    SELECT r.id, r.client_name, p.address, r.start_date, r.end_date, r.amount, r.paid 
+    FROM rentals r JOIN properties p ON r.property_id = p.id
+"""
+SQL_SELECT_PAYMENTS = """
+    SELECT r.client_name, p.address, py.amount, py.payment_date, 
+    CONCAT(py.period_start, ' - ', py.period_end) 
+    FROM payments py JOIN rentals r ON py.rental_id = r.id JOIN properties p ON r.property_id = p.id
+"""
+SQL_SELECT_AVAILABLE_PROPERTIES = "SELECT id, address FROM properties WHERE status = 'Свободен' OR status = 'Чистый'"
+SQL_INSERT_RENTAL = "INSERT INTO rentals (client_name, property_id, start_date, end_date, amount) VALUES (%s, %s, %s, %s, %s)"
+SQL_UPDATE_PROPERTY_STATUS = "UPDATE properties SET status = %s, checkout_date = %s WHERE id = %s"
+SQL_INSERT_PAYMENT = "INSERT INTO payments (rental_id, payment_date, amount, period_start, period_end) VALUES (%s, %s, %s, %s, %s)"
+SQL_UPDATE_RENTAL_PAID = "UPDATE rentals SET paid = TRUE WHERE id = %s"
+SQL_SELECT_CLEANING_TASKS = "SELECT p.id, p.address, p.status FROM properties p WHERE p.status IN ('Грязный', 'Назначен к уборке')"
+SQL_UPDATE_CLEANING_STATUS = "UPDATE properties SET status = %s WHERE id = %s"
+SQL_SELECT_USER_RENTALS = """
+    SELECT p.address, r.start_date, r.end_date, r.amount, r.paid 
+    FROM rentals r JOIN properties p ON r.property_id = p.id 
+    WHERE r.client_name = %s
+"""
+SQL_SELECT_STATISTICS = """
+    SELECT 
+        COUNT(*) as total_properties,
+        SUM(CASE WHEN status IN ('Занят', 'Грязный', 'Назначен к уборке') THEN 1 ELSE 0 END) as occupied,
+        SUM(CASE WHEN status IN ('Свободен', 'Чистый') THEN 1 ELSE 0 END) as available,
+        SUM(CASE WHEN status = 'Грязный' THEN 1 ELSE 0 END) as dirty,
+        SUM(CASE WHEN status = 'Назначен к уборке' THEN 1 ELSE 0 END) as assigned_to_clean,
+        SUM(CASE WHEN status = 'Чистый' THEN 1 ELSE 0 END) as clean
+    FROM properties
+"""
+SQL_SELECT_REVENUE = "SELECT SUM(amount) FROM rentals WHERE paid = TRUE"
+SQL_DELETE_RENTAL = "DELETE FROM rentals WHERE id = %s"
+SQL_SELECT_PROPERTY_BY_ID = "SELECT address, status FROM properties WHERE id = %s"
+
+class Database:
+    def __init__(self):
+        try:
+            self.connection = mysql.connector.connect(
+                host="localhost",
+                user="root",
+                password="1111",
+                database="rent_management"
+            )
+            self.cursor = self.connection.cursor()
+        except mysql.connector.Error as e:
+            messagebox.showerror("Database Error", f"Ошибка подключения к БД: {e}")
+            raise SystemExit("Нет подключения к базе данных")
+
+    def execute_query(self, query, params=None, fetch=False):
+        try:
+            self.cursor.execute(query, params or ())
+            if fetch:
+                return self.cursor.fetchall()
+            self.connection.commit()
+            return True
+        except Exception as e:
+            messagebox.showerror("Database Error", str(e))
+            return False
+
+    def close(self):
+        if self.connection:
+            self.cursor.close()
+            self.connection.close()
+
+class LoginWindow:
+    def __init__(self, root, on_login):
+        self.root = root
+        self.root.title("Вход в систему")
+        self.root.geometry("300x200")
+        self.root.resizable(False, False)
+        self.on_login = on_login
+        self.db = Database()
+        
+        self._create_widgets()
+        self._insert_test_users()
+
+    def _create_widgets(self):
+        ttk.Label(self.root, text="Логин:").pack(pady=5)
+        self.username_entry = ttk.Entry(self.root)
+        self.username_entry.pack(pady=5)
+
+        ttk.Label(self.root, text="Пароль:").pack(pady=5)
+        self.password_entry = ttk.Entry(self.root, show="*")
+        self.password_entry.pack(pady=5)
+
+        ttk.Button(self.root, text="Войти", command=self.authenticate).pack(pady=10)
+        ttk.Button(self.root, text="Регистрация", command=self.show_register).pack(pady=5)
+
+    def _insert_test_users(self):
+        test_users = [
+            ("admin", "admin123", "Администратор"),
+            ("cleaner", "cleaner123", "Уборщик")
+        ]
+        for user in test_users:
+            self.db.execute_query(
+                "INSERT IGNORE INTO users (username, password, full_name) VALUES (%s, %s, %s)",
+                user
+            )
+
+    def show_register(self):
+        register_window = tk.Toplevel(self.root)
+        register_window.title("Регистрация")
+        register_window.geometry("300x250")
+        register_window.resizable(False, False)
+
+        ttk.Label(register_window, text="Логин:").pack(pady=5)
+        username_entry = ttk.Entry(register_window)
+        username_entry.pack(pady=5)
+
+        ttk.Label(register_window, text="Пароль:").pack(pady=5)
+        password_entry = ttk.Entry(register_window, show="*")
+        password_entry.pack(pady=5)
+
+        ttk.Label(register_window, text="ФИО:").pack(pady=5)
+        fullname_entry = ttk.Entry(register_window)
+        fullname_entry.pack(pady=5)
+
+        def register():
+            username = username_entry.get()
+            password = password_entry.get()
+            fullname = fullname_entry.get()
+
+            if not username or not password or not fullname:
+                messagebox.showerror("Ошибка", "Заполните все поля")
+                return
+
+            try:
+                self.db.execute_query(
+                    SQL_INSERT_USER,
+                    (username, password, fullname)
+                )
+                messagebox.showinfo("Успех", "Регистрация прошла успешно")
+                register_window.destroy()
+            except mysql.connector.IntegrityError:
+                messagebox.showerror("Ошибка", "Пользователь с таким логином уже существует")
+
+        ttk.Button(register_window, text="Зарегистрироваться", command=register).pack(pady=10)
+        username_entry.focus_set()
+
+    def authenticate(self):
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+
+        if not username or not password:
+            messagebox.showerror("Ошибка", "Введите логин и пароль")
+            return
+
+        result = self.db.execute_query(
+            SQL_SELECT_USER,
+            (username, password),
+            fetch=True
+        )
+
+        if result:
+            user_data = {
+                "username": username,
+                "full_name": result[0][3],
+                "role": "admin" if username == "admin" else "cleaner" if username == "cleaner" else "client"
+            }
+            self.root.destroy()
+            self.on_login(user_data)
+        else:
+            messagebox.showerror("Ошибка", "Неверный логин или пароль")
+
+class MainWindow:
+    def __init__(self, root, user_data):
+        self.root = root
+        self.user_data = user_data
+        self.root.title(f"Управление арендой - {user_data['full_name']} ({user_data['role']})")
+        self.root.geometry("1000x600")
+        self.root.minsize(800, 400)
+        self.db = Database()
+
+        self._create_widgets()
+        self.load_data()
+
+    def _create_widgets(self):
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Properties tab (only for admin)
+        if self.user_data["role"] == "admin":
+            self.properties_frame = ttk.Frame(self.notebook)
+            self.notebook.add(self.properties_frame, text="Объекты")
+            
+            self.properties_tree = ttk.Treeview(self.properties_frame, columns=("id", "address", "category", "status", "checkout_date"), show="headings")
+            self.properties_tree.heading("id", text="ID")
+            self.properties_tree.heading("address", text="Адрес")
+            self.properties_tree.heading("category", text="Категория")
+            self.properties_tree.heading("status", text="Статус")
+            self.properties_tree.heading("checkout_date", text="Дата выезда")
+            self.properties_tree.column("id", width=50)
+            self.properties_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Rentals tab (for admin and client)
+        if self.user_data["role"] in ["admin", "client"]:
+            self.rentals_frame = ttk.Frame(self.notebook)
+            self.notebook.add(self.rentals_frame, text="Аренда")
+            
+            columns = ("id", "client", "property", "start_date", "end_date", "amount", "paid") if self.user_data["role"] == "admin" else ("property", "start_date", "end_date", "amount", "paid")
+            self.rentals_tree = ttk.Treeview(self.rentals_frame, columns=columns, show="headings")
+            
+            if self.user_data["role"] == "admin":
+                self.rentals_tree.heading("id", text="ID")
+                self.rentals_tree.heading("client", text="Клиент")
+                self.rentals_tree.heading("property", text="Объект")
+                self.rentals_tree.heading("start_date", text="Начало аренды")
+                self.rentals_tree.heading("end_date", text="Конец аренды")
+                self.rentals_tree.heading("amount", text="Сумма")
+                self.rentals_tree.heading("paid", text="Оплачено")
+            else:
+                self.rentals_tree.heading("property", text="Объект")
+                self.rentals_tree.heading("start_date", text="Начало аренды")
+                self.rentals_tree.heading("end_date", text="Конец аренды")
+                self.rentals_tree.heading("amount", text="Сумма")
+                self.rentals_tree.heading("paid", text="Оплачено")
+            
+            self.rentals_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Payments tab (only for admin)
+        if self.user_data["role"] == "admin":
+            self.payments_frame = ttk.Frame(self.notebook)
+            self.notebook.add(self.payments_frame, text="Платежи")
+            
+            self.payments_tree = ttk.Treeview(self.payments_frame, columns=("client", "property", "amount", "date", "period"), show="headings")
+            self.payments_tree.heading("client", text="Клиент")
+            self.payments_tree.heading("property", text="Объект")
+            self.payments_tree.heading("amount", text="Сумма")
+            self.payments_tree.heading("date", text="Дата оплаты")
+            self.payments_tree.heading("period", text="Период")
+            self.payments_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Cleaning tab (for admin and cleaner)
+        if self.user_data["role"] in ["admin", "cleaner"]:
+            self.cleaning_frame = ttk.Frame(self.notebook)
+            self.notebook.add(self.cleaning_frame, text="Уборка")
+            
+            self.cleaning_tree = ttk.Treeview(self.cleaning_frame, columns=("id", "address", "status"), show="headings")
+            self.cleaning_tree.heading("id", text="ID")
+            self.cleaning_tree.heading("address", text="Адрес")
+            self.cleaning_tree.heading("status", text="Статус")
+            self.cleaning_tree.column("id", width=50)
+            self.cleaning_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            btn_frame = ttk.Frame(self.cleaning_frame)
+            btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+            ttk.Button(btn_frame, text="Назначить на уборку", 
+                      command=lambda: self.update_cleaning_status("Назначен к уборке")).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Пометить как убранное", 
+                      command=lambda: self.update_cleaning_status("Чистый")).pack(side=tk.LEFT, padx=5)
+
+        # Statistics tab (only for admin)
+        if self.user_data["role"] == "admin":
+            self.stats_frame = ttk.Frame(self.notebook)
+            self.notebook.add(self.stats_frame, text="Статистика")
+            
+            self.stats_text = tk.Text(self.stats_frame, wrap=tk.WORD)
+            self.stats_scroll = ttk.Scrollbar(self.stats_frame, command=self.stats_text.yview)
+            self.stats_text.configure(yscrollcommand=self.stats_scroll.set)
+            
+            self.stats_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            self.stats_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            self.stats_text.config(state=tk.DISABLED)
+
+        # Buttons frame
+        self.buttons_frame = ttk.Frame(self.root)
+        self.buttons_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        if self.user_data["role"] == "admin":
+            ttk.Button(self.buttons_frame, text="Добавить аренду", command=self.add_rental).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Добавить платеж", command=self.add_payment).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Завершить аренду", command=self.end_rental).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Обновить данные", command=self.load_data).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Выход", command=self.logout).pack(side=tk.RIGHT, padx=5)
+        elif self.user_data["role"] == "client":
+            ttk.Button(self.buttons_frame, text="Арендовать помещение", command=self.add_rental).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Обновить данные", command=self.load_data).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Выход", command=self.logout).pack(side=tk.RIGHT, padx=5)
+        elif self.user_data["role"] == "cleaner":
+            ttk.Button(self.buttons_frame, text="Обновить данные", command=self.load_data).pack(side=tk.LEFT, padx=5)
+            ttk.Button(self.buttons_frame, text="Выход", command=self.logout).pack(side=tk.RIGHT, padx=5)
+    def logout(self):
+        """Выход из системы - закрываем главное окно и возвращаемся к окну входа"""
+        self.db.close()
+        self.root.destroy()
+        # Создаём новое окно входа
+        login_root = tk.Tk()
+        login_window = LoginWindow(login_root, self.on_login_success)
+        login_root.mainloop()
+
+    def on_login_success(self, user_data):
+        """Обработчик успешного входа (используется после logout)"""
+        main_window = tk.Tk()
+        app = MainWindow(main_window, user_data)
+        main_window.mainloop()
+        
+    def load_data(self):
+        # Load properties (for admin)
+        if self.user_data["role"] == "admin":
+            self.properties_tree.delete(*self.properties_tree.get_children())
+            properties = self.db.execute_query(SQL_SELECT_PROPERTIES, fetch=True)
+            for prop in properties:
+                self.properties_tree.insert("", tk.END, values=prop)
+
+        # Load rentals (for admin and client)
+        if self.user_data["role"] in ["admin", "client"]:
+            self.rentals_tree.delete(*self.rentals_tree.get_children())
+            if self.user_data["role"] == "admin":
+                rentals = self.db.execute_query(SQL_SELECT_RENTALS, fetch=True)
+                for rental in rentals:
+                    paid = "Да" if rental[6] else "Нет"
+                    self.rentals_tree.insert("", tk.END, values=rental[:6] + (paid,))
+            else:
+                rentals = self.db.execute_query(
+                    SQL_SELECT_USER_RENTALS,
+                    (self.user_data["full_name"],),
+                    fetch=True
+                )
+                for rental in rentals:
+                    paid = "Да" if rental[4] else "Нет"
+                    self.rentals_tree.insert("", tk.END, values=(*rental[:4], paid))
+
+        # Load payments (for admin)
+        if self.user_data["role"] == "admin":
+            self.payments_tree.delete(*self.payments_tree.get_children())
+            payments = self.db.execute_query(SQL_SELECT_PAYMENTS, fetch=True)
+            for payment in payments:
+                self.payments_tree.insert("", tk.END, values=payment)
+
+        # Load cleaning tasks (for admin and cleaner)
+        if self.user_data["role"] in ["admin", "cleaner"]:
+            self.cleaning_tree.delete(*self.cleaning_tree.get_children())
+            cleaning_tasks = self.db.execute_query(SQL_SELECT_CLEANING_TASKS, fetch=True)
+            for task in cleaning_tasks:
+                self.cleaning_tree.insert("", tk.END, values=task)
+
+        # Load statistics (for admin)
+        if self.user_data["role"] == "admin":
+            self.stats_text.config(state=tk.NORMAL)
+            self.stats_text.delete(1.0, tk.END)
+            
+            # Property statistics
+            stats = self.db.execute_query(SQL_SELECT_STATISTICS, fetch=True)[0]
+            total, occupied, available, dirty, assigned, clean = stats
+            
+            self.stats_text.insert(tk.END, "=== Статистика по недвижимости ===\n")
+            self.stats_text.insert(tk.END, f"Всего объектов: {total}\n")
+            self.stats_text.insert(tk.END, f"Занято: {occupied} ({occupied/total*100:.1f}%)\n")
+            self.stats_text.insert(tk.END, f"Доступно: {available} ({available/total*100:.1f}%)\n")
+            self.stats_text.insert(tk.END, f"Грязные: {dirty}\n")
+            self.stats_text.insert(tk.END, f"Назначены к уборке: {assigned}\n")
+            self.stats_text.insert(tk.END, f"Чистые: {clean}\n\n")
+            
+            # Revenue statistics
+            revenue = self.db.execute_query(SQL_SELECT_REVENUE, fetch=True)[0][0] or 0
+            self.stats_text.insert(tk.END, "=== Финансовая статистика ===\n")
+            self.stats_text.insert(tk.END, f"Общий доход: {revenue:.2f} руб.\n")
+            
+            if occupied > 0:
+                avg_revenue = revenue / occupied
+                self.stats_text.insert(tk.END, f"Средний доход с объекта: {avg_revenue:.2f} руб.\n")
+            
+            self.stats_text.config(state=tk.DISABLED)
+
+    def add_rental(self):
+        rental_window = tk.Toplevel(self.root)
+        rental_window.title("Добавление аренды")
+        rental_window.geometry("400x350")
+        rental_window.resizable(False, False)
+
+        properties = self.db.execute_query(SQL_SELECT_AVAILABLE_PROPERTIES, fetch=True)
+
+        if not properties:
+            messagebox.showwarning("Предупреждение", "Нет свободных объектов для аренды")
+            rental_window.destroy()
+            return
+
+        if self.user_data["role"] == "admin":
+            ttk.Label(rental_window, text="Клиент:").pack(pady=5)
+            client_entry = ttk.Entry(rental_window)
+            client_entry.pack(pady=5)
+
+        ttk.Label(rental_window, text="Объект:").pack(pady=5)
+        property_combobox = ttk.Combobox(rental_window, values=[p[1] for p in properties], state="readonly")
+        property_combobox.pack(pady=5)
+
+        ttk.Label(rental_window, text="Дата начала (ГГГГ-ММ-ДД):").pack(pady=5)
+        start_date_entry = ttk.Entry(rental_window)
+        start_date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        start_date_entry.pack(pady=5)
+
+        ttk.Label(rental_window, text="Дата окончания (ГГГГ-ММ-ДД):").pack(pady=5)
+        end_date_entry = ttk.Entry(rental_window)
+        end_date_entry.pack(pady=5)
+
+        ttk.Label(rental_window, text="Сумма аренды:").pack(pady=5)
+        amount_entry = ttk.Entry(rental_window)
+        amount_entry.pack(pady=5)
+
+        def validate_date(date_text):
+            try:
+                datetime.strptime(date_text, '%Y-%m-%d')
+                return True
+            except ValueError:
+                return False
+
+        def save_rental():
+            if self.user_data["role"] == "admin":
+                client = client_entry.get()
+                if not client:
+                    messagebox.showerror("Ошибка", "Введите имя клиента")
+                    return
+            else:
+                client = self.user_data["full_name"]
+
+            property_addr = property_combobox.get()
+            start_date = start_date_entry.get()
+            end_date = end_date_entry.get()
+            amount = amount_entry.get()
+
+            if not property_addr or not start_date or not amount:
+                messagebox.showerror("Ошибка", "Заполните обязательные поля")
+                return
+
+            if not validate_date(start_date):
+                messagebox.showerror("Ошибка", "Неверный формат даты начала (ГГГГ-ММ-ДД)")
+                return
+
+            if end_date and not validate_date(end_date):
+                messagebox.showerror("Ошибка", "Неверный формат даты окончания (ГГГГ-ММ-ДД)")
+                return
+
+            try:
+                amount = float(amount)
+            except ValueError:
+                messagebox.showerror("Ошибка", "Сумма аренды должна быть числом")
+                return
+
+            try:
+                property_id = next(p[0] for p in properties if p[1] == property_addr)
+
+                self.db.execute_query(
+                    SQL_INSERT_RENTAL,
+                    (client, property_id, start_date, end_date if end_date else None, amount)
+                )
+
+                self.db.execute_query(
+                    SQL_UPDATE_PROPERTY_STATUS,
+                    ("Занят", end_date if end_date else None, property_id)
+                )
+
+                messagebox.showinfo("Успех", "Аренда успешно добавлена")
+                rental_window.destroy()
+                self.load_data()
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Ошибка при сохранении аренды: {str(e)}")
+
+        ttk.Button(rental_window, text="Сохранить", command=save_rental).pack(pady=15)
+        if self.user_data["role"] == "admin":
+            client_entry.focus_set()
+        else:
+            property_combobox.focus_set()
+
+    def add_payment(self):
+        selected = self.rentals_tree.focus()
+        if not selected:
+            messagebox.showwarning("Предупреждение", "Выберите аренду для добавления платежа")
+            return
+
+        item = self.rentals_tree.item(selected)
+        values = item['values']
+        
+        if len(values) < 7:
+            messagebox.showwarning("Предупреждение", "Недостаточно данных для добавления платежа")
+            return
+
+        rental_id, client, property_addr, start_date, end_date, amount, paid = values
+
+        if paid == "Да":
+            messagebox.showwarning("Предупреждение", "Аренда уже оплачена")
+            return
+
+        payment_window = tk.Toplevel(self.root)
+        payment_window.title("Добавление платежа")
+        payment_window.geometry("400x300")
+        payment_window.resizable(False, False)
+
+        ttk.Label(payment_window, text=f"Клиент: {client}").pack(pady=5)
+        ttk.Label(payment_window, text=f"Объект: {property_addr}").pack(pady=5)
+        ttk.Label(payment_window, text=f"Сумма: {amount}").pack(pady=5)
+
+        ttk.Label(payment_window, text="Дата оплаты:").pack(pady=5)
+        payment_date_entry = ttk.Entry(payment_window)
+        payment_date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        payment_date_entry.pack(pady=5)
+
+        ttk.Label(payment_window, text="Период с:").pack(pady=5)
+        period_start_entry = ttk.Entry(payment_window)
+        period_start_entry.pack(pady=5)
+
+        ttk.Label(payment_window, text="Период по:").pack(pady=5)
+        period_end_entry = ttk.Entry(payment_window)
+        period_end_entry.pack(pady=5)
+
+        def validate_date(date_text):
+            try:
+                datetime.strptime(date_text, '%Y-%m-%d')
+                return True
+            except ValueError:
+                return False
+
+        def save_payment():
+            payment_date = payment_date_entry.get()
+            period_start = period_start_entry.get()
+            period_end = period_end_entry.get()
+
+            if not validate_date(payment_date):
+                messagebox.showerror("Ошибка", "Неверный формат даты оплаты (ГГГГ-ММ-ДД)")
+                return
+
+            if period_start and not validate_date(period_start):
+                messagebox.showerror("Ошибка", "Неверный формат даты начала периода (ГГГГ-ММ-ДД)")
+                return
+
+            if period_end and not validate_date(period_end):
+                messagebox.showerror("Ошибка", "Неверный формат даты конца периода (ГГГГ-ММ-ДД)")
+                return
+
+            try:
+                self.db.execute_query(
+                    SQL_INSERT_PAYMENT,
+                    (rental_id, payment_date, amount, period_start, period_end)
+                )
+
+                self.db.execute_query(
+                    SQL_UPDATE_RENTAL_PAID,
+                    (rental_id,)
+                )
+
+                messagebox.showinfo("Успех", "Платеж успешно добавлен")
+                payment_window.destroy()
+                self.load_data()
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Ошибка при сохранении платежа: {str(e)}")
+
+        ttk.Button(payment_window, text="Сохранить", command=save_payment).pack(pady=15)
+        payment_date_entry.focus_set()
+
+    def end_rental(self):
+        selected = self.rentals_tree.focus()
+        if not selected:
+            messagebox.showwarning("Предупреждение", "Выберите аренду для завершения")
+            return
+
+        item = self.rentals_tree.item(selected)
+        values = item['values']
+        
+        if len(values) < 7:
+            messagebox.showwarning("Предупреждение", "Недостаточно данных для завершения аренды")
+            return
+
+        rental_id, client, property_addr, start_date, end_date, amount, paid = values
+
+        if end_date and datetime.strptime(end_date, "%Y-%m-%d") > datetime.now():
+            messagebox.showwarning("Предупреждение", "Аренда еще не завершена по сроку")
+            return
+
+        # Get property ID
+        property_id = None
+        properties = self.db.execute_query(
+            "SELECT id FROM properties WHERE address = %s",
+            (property_addr,),
+            fetch=True
+        )
+        if properties:
+            property_id = properties[0][0]
+
+        if not property_id:
+            messagebox.showerror("Ошибка", "Не удалось найти объект недвижимости")
+            return
+
+        # Update property status to "Грязный"
+        self.db.execute_query(
+            SQL_UPDATE_PROPERTY_STATUS,
+            ("Грязный", None, property_id)
+        )
+
+        # Delete rental record
+        self.db.execute_query(
+            SQL_DELETE_RENTAL,
+            (rental_id,)
+        )
+
+        messagebox.showinfo("Успех", "Аренда успешно завершена, объект помечен как 'Грязный'")
+        self.load_data()
+
+    def update_cleaning_status(self, new_status):
+        selected = self.cleaning_tree.focus()
+        if not selected:
+            messagebox.showwarning("Предупреждение", "Выберите объект для изменения статуса")
+            return
+
+        item = self.cleaning_tree.item(selected)
+        property_id, address, current_status = item['values']
+
+        if new_status == "Назначен к уборке" and current_status != "Грязный":
+            messagebox.showwarning("Предупреждение", "На уборку можно назначить только грязные объекты")
+            return
+        elif new_status == "Чистый" and current_status != "Назначен к уборке":
+            messagebox.showwarning("Предупреждение", "Можно пометить как убранное только объекты, назначенные к уборке")
+            return
+
+        self.db.execute_query(
+            SQL_UPDATE_CLEANING_STATUS,
+            (new_status, property_id)
+        )
+        messagebox.showinfo("Успех", f"Статус объекта успешно изменен на '{new_status}'")
+        self.load_data()
+
+def main():
+    root = tk.Tk()
+    root.title("Rent Management App")
+
+    def on_login_success(user_data):
+        main_window = tk.Tk()
+        app = MainWindow(main_window, user_data)
+        main_window.mainloop()
+
+    login_window = LoginWindow(root, on_login_success)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()

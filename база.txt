@@ -1,0 +1,58 @@
+CREATE DATABASE IF NOT EXISTS rental_db;
+USE rental_db;
+
+-- Таблица клиентов
+CREATE TABLE clients (
+id INT AUTO_INCREMENT PRIMARY KEY,
+full_name VARCHAR(100),
+phone VARCHAR(20),
+email VARCHAR(100)
+);
+
+-- Таблица недвижимости
+CREATE TABLE properties (
+id INT AUTO_INCREMENT PRIMARY KEY,
+address VARCHAR(255),
+area FLOAT,
+status ENUM('Свободен', 'Занят', 'Грязный', 'Назначен к уборке', 'Чистый') DEFAULT 'Свободен'
+);
+
+-- Таблица сотрудников
+CREATE TABLE staff (
+id INT AUTO_INCREMENT PRIMARY KEY,
+full_name VARCHAR(100),
+role ENUM('Администратор', 'Уборщик')
+);
+
+-- Таблица бронирований
+CREATE TABLE bookings (
+id INT AUTO_INCREMENT PRIMARY KEY,
+client_id INT,
+property_id INT,
+start_date DATE,
+end_date DATE,
+payment_status ENUM('Ожидает', 'Оплачено') DEFAULT 'Ожидает',
+FOREIGN KEY (client_id) REFERENCES clients(id),
+FOREIGN KEY (property_id) REFERENCES properties(id)
+);
+
+-- Таблица уборок
+CREATE TABLE cleanings (
+id INT AUTO_INCREMENT PRIMARY KEY,
+property_id INT,
+staff_id INT,
+cleaning_date DATE,
+status ENUM('Запланирована', 'Выполнена') DEFAULT 'Запланирована',
+FOREIGN KEY (property_id) REFERENCES properties(id),
+FOREIGN KEY (staff_id) REFERENCES staff(id)
+);
+
+-- Примерные данные
+INSERT INTO properties (address, area, status) VALUES
+('ул. Ленина, 10', 50.0, 'Свободен'),
+('ул. Пушкина, 15', 75.0, 'Чистый'),
+('ул. Гагарина, 20', 60.0, 'Грязный');
+
+INSERT INTO staff (full_name, role) VALUES
+('Иванов Иван', 'Администратор'),
+('Петров Петр', 'Уборщик');
